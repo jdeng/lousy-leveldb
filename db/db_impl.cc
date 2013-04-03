@@ -120,6 +120,7 @@ DBImpl::DBImpl(const Options& options, const std::string& dbname)
       owns_info_log_(options_.info_log != options.info_log),
       owns_cache_(options_.block_cache != options.block_cache),
       dbname_(dbname),
+      merger_(options.merger),
       db_lock_(NULL),
       shutting_down_(NULL),
       bg_cv_(&mutex_),
@@ -767,8 +768,7 @@ Status DBImpl::OpenCompactionOutputFile(CompactionState* compact) {
   return s;
 }
 
-Status DBImpl::FinishCompactionOutputFile(CompactionState* compact,
-                                          Iterator* input) {
+Status DBImpl::FinishCompactionOutputFile(CompactionState* compact, Status input_status) {
   assert(compact != NULL);
   assert(compact->outfile != NULL);
   assert(compact->builder != NULL);
@@ -777,7 +777,7 @@ Status DBImpl::FinishCompactionOutputFile(CompactionState* compact,
   assert(output_number != 0);
 
   // Check for iterator errors
-  Status s = input->status();
+  Status s = input_status; //input->status();
   const uint64_t current_entries = compact->builder->NumEntries();
   if (s.ok()) {
     s = compact->builder->Finish();
@@ -840,6 +840,33 @@ Status DBImpl::InstallCompactionResults(CompactionState* compact) {
   return versions_->LogAndApply(compact->compaction->edit(), &mutex_);
 }
 
+Status DBImpl::Output(CompactionState* compact, const Slice& key, const Slice& value, Status input_status) {
+  Status status;
+        // Open output file if necessary
+  if (compact->builder == NULL) {
+    status = OpenCompactionOutputFile(compact);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  if (compact->builder->NumEntries() == 0) {
+    compact->current_output()->smallest.DecodeFrom(key);
+  }
+  compact->current_output()->largest.DecodeFrom(key);
+  compact->builder->Add(key, value);
+
+  // Close output file if it is big enough
+  if (compact->builder->FileSize() >=
+      compact->compaction->MaxOutputFileSize()) {
+    status = FinishCompactionOutputFile(compact, input_status);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  
+  return status;
+}
+
 Status DBImpl::DoCompactionWork(CompactionState* compact) {
   const uint64_t start_micros = env_->NowMicros();
   int64_t imm_micros = 0;  // Micros spent doing imm_ compactions
@@ -869,6 +896,9 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
   std::string current_user_key;
   bool has_current_user_key = false;
   SequenceNumber last_sequence_for_key = kMaxSequenceNumber;
+
+  std::string saved_key, saved_value;
+  bool has_full_value = false, has_partial_value = false;
   for (; input->Valid() && !shutting_down_.Acquire_Load(); ) {
     // Prioritize immutable compaction work
     if (has_imm_.NoBarrier_Load() != NULL) {
@@ -885,7 +915,14 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
     Slice key = input->key();
     if (compact->compaction->ShouldStopBefore(key) &&
         compact->builder != NULL) {
-      status = FinishCompactionOutputFile(compact, input);
+
+      if (!has_full_value && has_partial_value) {
+		    status = Output(compact, saved_key, saved_value, input->status());
+        if (!status.ok()) break;
+        has_partial_value = false;
+	    }
+
+      status = FinishCompactionOutputFile(compact, input->status());
       if (!status.ok()) {
         break;
       }
@@ -898,19 +935,45 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
       current_user_key.clear();
       has_current_user_key = false;
       last_sequence_for_key = kMaxSequenceNumber;
+
+			saved_key.clear();
+      saved_value.clear();
+      if (!has_full_value && has_partial_value) {
+			  status = Output(compact, Slice(saved_key), Slice(saved_value), input->status());
+        if (!status.ok()) break;
+        has_partial_value = false;
+      }
     } else {
       if (!has_current_user_key ||
           user_comparator()->Compare(ikey.user_key,
                                      Slice(current_user_key)) != 0) {
+				//TODO: output
+        if (!has_full_value && has_partial_value) {
+					if (compact->compaction->IsBaseLevelForKey(current_user_key)) {
+						UpdateInternalKey(saved_key, kTypeValue);
+            if (merger_) merger_->Shrink(&saved_value);
+          }
+          status = Output(compact, Slice(saved_key), Slice(saved_value), input->status());
+          if (!status.ok()) break;
+          has_partial_value = false;
+        }
+
         // First occurrence of this user key
         current_user_key.assign(ikey.user_key.data(), ikey.user_key.size());
         has_current_user_key = true;
         last_sequence_for_key = kMaxSequenceNumber;
+
+        has_full_value = false; 
+        has_partial_value = false; 
+        if (ikey.type == kTypePartialValue)
+          saved_key.assign(key.data(), key.size());
+        saved_value.clear();
       }
 
       if (last_sequence_for_key <= compact->smallest_snapshot) {
         // Hidden by an newer entry for same user key
-        drop = true;    // (A)
+        if (has_full_value)
+          drop = true;    // (A)
       } else if (ikey.type == kTypeDeletion &&
                  ikey.sequence <= compact->smallest_snapshot &&
                  compact->compaction->IsBaseLevelForKey(ikey.user_key)) {
@@ -921,7 +984,22 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
         //     smaller sequence numbers will be dropped in the next
         //     few iterations of this loop (by rule (A) above).
         // Therefore this deletion marker is obsolete and can be dropped.
-        drop = true;
+        if (!has_partial_value) {
+          drop = true;
+          if (! has_full_value) has_full_value = true;
+        }
+      }
+
+      if (!drop) {
+        if ((has_partial_value || ikey.type == kTypePartialValue) && merger_) {
+          merger_->Merge(&saved_value, ikey.type == kTypePartialValue, ikey.type == kTypeDeletion? Slice(): input->value());
+        }
+        if (ikey.type == kTypeValue || ikey.type == kTypeDeletion) {
+          has_full_value = true;
+        }
+        else {
+          has_partial_value = true;
+        }
       }
 
       last_sequence_for_key = ikey.sequence;
@@ -937,37 +1015,36 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
 #endif
 
     if (!drop) {
-      // Open output file if necessary
-      if (compact->builder == NULL) {
-        status = OpenCompactionOutputFile(compact);
-        if (!status.ok()) {
-          break;
-        }
-      }
-      if (compact->builder->NumEntries() == 0) {
-        compact->current_output()->smallest.DecodeFrom(key);
-      }
-      compact->current_output()->largest.DecodeFrom(key);
-      compact->builder->Add(key, input->value());
-
-      // Close output file if it is big enough
-      if (compact->builder->FileSize() >=
-          compact->compaction->MaxOutputFileSize()) {
-        status = FinishCompactionOutputFile(compact, input);
-        if (!status.ok()) {
-          break;
-        }
+			if (has_full_value && !has_partial_value) {
+      	status = Output(compact, key, input->value(), input->status());
+			}
+			else if (has_full_value) {
+				UpdateInternalKey(saved_key, kTypeValue);
+        if (merger_) merger_->Shrink(&saved_value);
+				status = Output(compact, saved_key, saved_value, input->status());
+        has_partial_value = false;
+			}
+      if (!status.ok()) {
+        break;
       }
     }
 
     input->Next();
   }
 
+	if (status.ok() && has_partial_value && !has_full_value) {
+    if (!shutting_down_.Acquire_Load() && compact->compaction->IsBaseLevelForKey(current_user_key)) {
+      UpdateInternalKey(saved_key, kTypeValue);
+      if (merger_) merger_->Shrink(&saved_value);
+    }
+		status = Output(compact, saved_key, saved_value, input->status());
+	}
+
   if (status.ok() && shutting_down_.Acquire_Load()) {
     status = Status::IOError("Deleting DB during compaction");
   }
   if (status.ok() && compact->builder != NULL) {
-    status = FinishCompactionOutputFile(compact, input);
+    status = FinishCompactionOutputFile(compact, input->status());
   }
   if (status.ok()) {
     status = input->status();
@@ -1083,16 +1160,21 @@ Status DBImpl::Get(const ReadOptions& options,
     mutex_.Unlock();
     // First look in the memtable, then in the immutable memtable (if any).
     LookupKey lkey(key, snapshot);
-    if (mem->Get(lkey, value, &s)) {
+    if (mem->Get(lkey, value, merger_, &s)) {
       // Done
-    } else if (imm != NULL && imm->Get(lkey, value, &s)) {
+    } else if (imm != NULL && imm->Get(lkey, value, merger_, &s)) {
       // Done
     } else {
-      s = current->Get(options, lkey, value, &stats);
+      bool has_value = s.IsPartialValue();
+      s = current->Get(options, lkey, value, merger_, &stats);
+      if ((has_value && s.IsNotFound()) || s.IsPartialValue()) s = Status::OK();
       have_stat_update = true;
     }
     mutex_.Lock();
   }
+
+  if (options.shrink_result && merger_)
+    merger_->Shrink(value);
 
   if (have_stat_update && current->UpdateStats(stats)) {
     MaybeScheduleCompaction();
@@ -1126,6 +1208,10 @@ void DBImpl::ReleaseSnapshot(const Snapshot* s) {
 // Convenience methods
 Status DBImpl::Put(const WriteOptions& o, const Slice& key, const Slice& val) {
   return DB::Put(o, key, val);
+}
+
+Status DBImpl::Append(const WriteOptions& o, const Slice& key, const Slice& val) {
+  return DB::Append(o, key, val);
 }
 
 Status DBImpl::Delete(const WriteOptions& options, const Slice& key) {
@@ -1393,6 +1479,12 @@ void DBImpl::GetApproximateSizes(
 Status DB::Put(const WriteOptions& opt, const Slice& key, const Slice& value) {
   WriteBatch batch;
   batch.Put(key, value);
+  return Write(opt, &batch);
+}
+
+Status DB::Append(const WriteOptions& opt, const Slice& key, const Slice& value) {
+  WriteBatch batch;
+  batch.Append(key, value);
   return Write(opt, &batch);
 }
 

@@ -7,6 +7,7 @@
 
 #include <stdio.h>
 #include "leveldb/comparator.h"
+#include "leveldb/value_merger.h"
 #include "leveldb/db.h"
 #include "leveldb/filter_policy.h"
 #include "leveldb/slice.h"
@@ -47,7 +48,8 @@ class InternalKey;
 // data structures.
 enum ValueType {
   kTypeDeletion = 0x0,
-  kTypeValue = 0x1
+  kTypeValue = 0x1,
+  kTypePartialValue = 0x2
 };
 // kValueTypeForSeek defines the ValueType that should be passed when
 // constructing a ParsedInternalKey object for seeking to a particular
@@ -55,7 +57,7 @@ enum ValueType {
 // and the value type is embedded as the low 8 bits in the sequence
 // number in internal keys, we need to use the highest-numbered
 // ValueType, not the lowest).
-static const ValueType kValueTypeForSeek = kTypeValue;
+static const ValueType kValueTypeForSeek = kTypePartialValue;
 
 typedef uint64_t SequenceNumber;
 
@@ -179,7 +181,19 @@ inline bool ParseInternalKey(const Slice& internal_key,
   result->sequence = num >> 8;
   result->type = static_cast<ValueType>(c);
   result->user_key = Slice(internal_key.data(), n - 8);
-  return (c <= static_cast<unsigned char>(kTypeValue));
+//  return (c <= static_cast<unsigned char>(kTypeValue));
+  return (c <= static_cast<unsigned char>(kTypePartialValue));
+}
+
+inline bool UpdateInternalKey(std::string& ikey, ValueType vt) {
+  const size_t n = ikey.length();
+  if (n < 8) return false;
+  uint64_t num = DecodeFixed64(ikey.c_str() + n - 8);
+  num &= 0xffffffffffffff00;
+  num |= vt;
+  ikey.resize(n - 8);
+  PutFixed64(&ikey, num);
+  return true; 
 }
 
 // A helper class useful for DBImpl::Get()

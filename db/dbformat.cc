@@ -9,6 +9,8 @@
 
 namespace leveldb {
 
+ValueMerger::~ValueMerger() {}
+
 static uint64_t PackSequenceAndType(uint64_t seq, ValueType t) {
   assert(seq <= kMaxSequenceNumber);
   assert(t <= kValueTypeForSeek);

@@ -105,11 +105,13 @@ void MemTable::Add(SequenceNumber s, ValueType type,
   table_.Insert(buf);
 }
 
-bool MemTable::Get(const LookupKey& key, std::string* value, Status* s) {
+bool MemTable::Get(const LookupKey& key, std::string* value, const ValueMerger *merger, Status* s) {
   Slice memkey = key.memtable_key();
   Table::Iterator iter(&table_);
   iter.Seek(memkey.data());
-  if (iter.Valid()) {
+//  if (iter.Valid()) {
+  bool has_value = s->IsPartialValue();
+  while (iter.Valid()) {
     // entry format is:
     //    klength  varint32
     //    userkey  char[klength]
@@ -124,21 +126,38 @@ bool MemTable::Get(const LookupKey& key, std::string* value, Status* s) {
     const char* key_ptr = GetVarint32Ptr(entry, entry+5, &key_length);
     if (comparator_.comparator.user_comparator()->Compare(
             Slice(key_ptr, key_length - 8),
-            key.user_key()) == 0) {
-      // Correct user key
-      const uint64_t tag = DecodeFixed64(key_ptr + key_length - 8);
-      switch (static_cast<ValueType>(tag & 0xff)) {
-        case kTypeValue: {
-          Slice v = GetLengthPrefixedSlice(key_ptr + key_length);
-          value->assign(v.data(), v.size());
-          return true;
-        }
-        case kTypeDeletion:
-          *s = Status::NotFound(Slice());
-          return true;
-      }
+            key.user_key()) != 0) {
+      break;
     }
+
+    // Correct user key
+    const uint64_t tag = DecodeFixed64(key_ptr + key_length - 8);
+    ValueType vt = static_cast<ValueType>(tag & 0xff);
+    
+    if (vt == kTypeValue || vt == kTypePartialValue) {
+      Slice v = GetLengthPrefixedSlice(key_ptr + key_length);
+      if (merger) merger->Merge(value, (vt == kTypePartialValue), v);
+      else value->assign(v.data(), v.size());
+
+      if (vt == kTypeValue || !merger) 
+        return true;  
+
+      has_value = true;
+    }
+    else if (vt == kTypeDeletion) {
+      if (merger) merger->Merge(value, true, Slice());
+      if (! has_value) *s = Status::NotFound(Slice());
+      return true;
+    }
+
+    iter.Next();
   }
+
+  if (has_value) {
+    *s = Status::PartialValue(Slice());
+    return false;
+  }
+
   return false;
 }
 

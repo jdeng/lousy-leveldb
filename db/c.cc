@@ -372,6 +372,9 @@ void leveldb_writebatch_iterate(
     virtual void Put(const Slice& key, const Slice& value) {
       (*put_)(state_, key.data(), key.size(), value.data(), value.size());
     }
+    virtual void Append(const Slice& key, const Slice& value) {
+      //TODO
+    }
     virtual void Delete(const Slice& key) {
       (*deleted_)(state_, key.data(), key.size());
     }

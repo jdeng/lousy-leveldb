@@ -75,6 +75,11 @@ class WriteBatchItemPrinter : public WriteBatch::Handler {
            EscapeString(key).c_str(),
            EscapeString(value).c_str());
   }
+  virtual void Append(const Slice& key, const Slice& value) {
+    printf("  append '%s' '%s'\n",
+           EscapeString(key).c_str(),
+           EscapeString(value).c_str());
+  }
   virtual void Delete(const Slice& key) {
     printf("  del '%s'\n",
            EscapeString(key).c_str());
