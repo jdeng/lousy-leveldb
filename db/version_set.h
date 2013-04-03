@@ -35,6 +35,7 @@ class TableCache;
 class Version;
 class VersionSet;
 class WritableFile;
+class ValueMerger;
 
 // Return the smallest index i such that files[i]->largest >= key.
 // Return files.size() if there is no such file.
@@ -70,7 +71,7 @@ class Version {
     FileMetaData* seek_file;
     int seek_file_level;
   };
-  Status Get(const ReadOptions&, const LookupKey& key, std::string* val,
+  Status Get(const ReadOptions&, const LookupKey& key, std::string* val, const ValueMerger *merger,
              GetStats* stats);
 
   // Adds "stats" into the current state.  Returns true if a new

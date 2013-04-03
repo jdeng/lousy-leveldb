@@ -61,6 +61,14 @@ Status WriteBatch::Iterate(Handler* handler) const {
           return Status::Corruption("bad WriteBatch Put");
         }
         break;
+      case kTypePartialValue:
+        if (GetLengthPrefixedSlice(&input, &key) &&
+            GetLengthPrefixedSlice(&input, &value)) {
+          handler->Append(key, value);
+        } else {
+          return Status::Corruption("bad WriteBatch Append");
+        }
+        break;
       case kTypeDeletion:
         if (GetLengthPrefixedSlice(&input, &key)) {
           handler->Delete(key);
@@ -102,6 +110,13 @@ void WriteBatch::Put(const Slice& key, const Slice& value) {
   PutLengthPrefixedSlice(&rep_, value);
 }
 
+void WriteBatch::Append(const Slice& key, const Slice& value) {
+  WriteBatchInternal::SetCount(this, WriteBatchInternal::Count(this) + 1);
+  rep_.push_back(static_cast<char>(kTypePartialValue));
+  PutLengthPrefixedSlice(&rep_, key);
+  PutLengthPrefixedSlice(&rep_, value);
+}
+
 void WriteBatch::Delete(const Slice& key) {
   WriteBatchInternal::SetCount(this, WriteBatchInternal::Count(this) + 1);
   rep_.push_back(static_cast<char>(kTypeDeletion));
@@ -116,6 +131,10 @@ class MemTableInserter : public WriteBatch::Handler {
 
   virtual void Put(const Slice& key, const Slice& value) {
     mem_->Add(sequence_, kTypeValue, key, value);
+    sequence_++;
+  }
+  virtual void Append(const Slice& key, const Slice& value) {
+    mem_->Add(sequence_, kTypePartialValue, key, value);
     sequence_++;
   }
   virtual void Delete(const Slice& key) {

@@ -281,6 +281,10 @@ class DBTest {
     return db_->Put(WriteOptions(), k, v);
   }
 
+  Status Append(const std::string& k, const std::string& v) {
+    return db_->Append(WriteOptions(), k, v);
+  }
+
   Status Delete(const std::string& k) {
     return db_->Delete(WriteOptions(), k);
   }
@@ -348,6 +352,8 @@ class DBTest {
           }
           first = false;
           switch (ikey.type) {
+            case kTypePartialValue:
+              result += "[P]";
             case kTypeValue:
               result += iter->value().ToString();
               break;
@@ -1770,6 +1776,9 @@ class ModelDB: public DB {
   virtual Status Put(const WriteOptions& o, const Slice& k, const Slice& v) {
     return DB::Put(o, k, v);
   }
+  virtual Status Append(const WriteOptions& o, const Slice& k, const Slice& v) {
+    return DB::Append(o, k, v);
+  }
   virtual Status Delete(const WriteOptions& o, const Slice& key) {
     return DB::Delete(o, key);
   }
@@ -1804,6 +1813,9 @@ class ModelDB: public DB {
       KVMap* map_;
       virtual void Put(const Slice& key, const Slice& value) {
         (*map_)[key.ToString()] = value.ToString();
+      }
+      virtual void Append(const Slice& key, const Slice& value) {
+        (*map_)[key.ToString()] += value.ToString();
       }
       virtual void Delete(const Slice& key) {
         map_->erase(key.ToString());
@@ -1984,6 +1996,114 @@ TEST(DBTest, Randomized) {
     if (model_snap != NULL) model.ReleaseSnapshot(model_snap);
     if (db_snap != NULL) db_->ReleaseSnapshot(db_snap);
   } while (ChangeOptions());
+}
+
+TEST(DBTest, ConcatValue) {
+  class ConcatValueMerger: public ValueMerger {
+  private:
+    std::string delimiter_;
+
+  private:
+    static void parse_item(const std::string& value, size_t start, size_t end, std::set<std::string>& items) {
+      bool is_negative = (value[start] == '-');
+      if (is_negative) start++;
+      std::string item = (end == std::string::npos)? value.substr(start): value.substr(start, end - start);
+			if (item.empty()) return;
+      if (is_negative) items.erase(item);
+      else items.insert(item); 
+    }
+
+  public:
+    explicit ConcatValueMerger(const char *delimiter) : delimiter_(delimiter) {}
+    int Merge(std::string *value, bool partial, const Slice& new_value) const {
+      if (!value->empty() && !delimiter_.empty()) value->append(delimiter_);
+      value->append(new_value.data(), new_value.size());
+      return 0;
+    }
+  
+    bool Shrink(std::string *value) const { 
+      size_t start = std::string::npos, end = std::string::npos;
+      std::set<std::string> items;
+      while ( (start = value->rfind(delimiter_, end)) != std::string::npos) {
+        parse_item(*value, start + delimiter_.length(), end == std::string::npos? end: end + 1, items);
+        if (start == 0) break;
+        end = start - 1;
+      } 
+      if (start != 0) parse_item(*value, 0, end == std::string::npos? end: end + 1, items);
+
+      std::string s;
+      for(std::set<std::string>::const_iterator it = items.begin(); it != items.end(); ++it) {
+        s += (*it);
+        s += ",";
+      }
+      if (!s.empty()) s.resize(s.length() - 1);
+      value->swap(s);
+
+      return true; 
+    }
+    
+    virtual const char* Name() const { return "leveldb.ConcatValueMerger"; }
+  };
+
+  class SumValueMerger: public ValueMerger {
+  public:
+    int Merge(std::string *value, bool partial, const Slice& new_value) const {
+      int d = 0;
+      if (new_value.size() > 0) d = atoi(std::string(new_value.data(), new_value.size()).c_str());
+
+      if (d != 0 || value->empty()) {
+        int n = 0;
+        if (!value->empty()) n = atoi(value->c_str());
+        n += d;
+
+        char buf[30];
+        snprintf(buf, sizeof(buf), "%d", n);
+        *value = buf;
+      }
+
+      return 0;
+    }
+    bool Shrink(std::string *value) const { return true; }
+
+    virtual const char* Name() const { return "leveldb.SumValueMerger"; }
+  };
+
+  ConcatValueMerger cvm(",");
+  SumValueMerger svm;
+  Options new_options = CurrentOptions();
+  new_options.create_if_missing = true;
+  new_options.merger  = &cvm;
+  new_options.filter_policy = NULL;     // Cannot use bloom filters
+  new_options.write_buffer_size = 1000;  // Compact more often
+  Reopen(&new_options);
+
+  ASSERT_OK(Append("k1", "v1"));
+	ASSERT_EQ(Get("k1"), "v1");
+  ASSERT_OK(Put("k1", "v2"));
+  ASSERT_OK(Append("k1", "v3"));
+  ASSERT_OK(Append("k1", "-v2"));
+	ASSERT_EQ(Get("k1"), "v3");
+  for (int i=0; i<1000; i++) {
+    char buf[30];
+    snprintf(buf, sizeof buf, "%d", i);
+    ASSERT_OK(Put(buf, buf));
+  }
+  db_->CompactRange(NULL, NULL);
+  ASSERT_OK(Append("k1", "v4"));
+  ASSERT_OK(Append("k1", "v3"));
+  for (int i=0; i<1000; i++) {
+    char buf[30];
+    snprintf(buf, sizeof buf, "%d", i);
+    ASSERT_OK(Put(buf, buf));
+  }
+  db_->CompactRange(NULL, NULL);
+  ASSERT_OK(Append("k1", "-v4"));
+	ASSERT_EQ(AllEntriesFor("k1"), "[ [P]-v4, v3,v4 ]");
+
+  ASSERT_OK(Append("k1", "v5"));
+  db_->CompactRange(NULL, NULL);
+	ASSERT_EQ(AllEntriesFor("k1"), "[ v3,v5 ]");
+	ASSERT_EQ(Get("k1"), "v3,v5");
 }
 
 std::string MakeKey(unsigned int num) {

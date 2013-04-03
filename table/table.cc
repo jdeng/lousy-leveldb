@@ -215,11 +215,12 @@ Iterator* Table::NewIterator(const ReadOptions& options) const {
 
 Status Table::InternalGet(const ReadOptions& options, const Slice& k,
                           void* arg,
-                          void (*saver)(void*, const Slice&, const Slice&)) {
+                          bool (*saver)(void*, const Slice&, const Slice&)) {
   Status s;
   Iterator* iiter = rep_->index_block->NewIterator(rep_->options.comparator);
   iiter->Seek(k);
-  if (iiter->Valid()) {
+  bool done = false;
+  while (iiter->Valid()) {
     Slice handle_value = iiter->value();
     FilterBlockReader* filter = rep_->filter;
     BlockHandle handle;
@@ -227,16 +228,25 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k,
         handle.DecodeFrom(&handle_value).ok() &&
         !filter->KeyMayMatch(handle.offset(), k)) {
       // Not found
+      done = true;
+      break; 
     } else {
       Slice handle = iiter->value();
       Iterator* block_iter = BlockReader(this, options, iiter->value());
       block_iter->Seek(k);
-      if (block_iter->Valid()) {
-        (*saver)(arg, block_iter->key(), block_iter->value());
+      while (block_iter->Valid()) {
+        if (! (*saver)(arg, block_iter->key(), block_iter->value())) {
+          done = true;
+          break;
+        }
+        block_iter->Next();
       }
       s = block_iter->status();
       delete block_iter;
     }
+
+    if (done) break;
+    iiter->Next();
   }
   if (s.ok()) {
     s = iiter->status();

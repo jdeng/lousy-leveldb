@@ -15,6 +15,7 @@ class Env;
 class FilterPolicy;
 class Logger;
 class Snapshot;
+class ValueMerger;
 
 // DB contents are stored in a set of blocks, each of which holds a
 // sequence of key,value pairs.  Each block may be compressed before
@@ -135,6 +136,9 @@ struct Options {
   // Default: NULL
   const FilterPolicy* filter_policy;
 
+  // If non-NULL, use the speicified merger to merge partial values.
+  const ValueMerger* merger;
+
   // Create an Options object with default values for all fields.
   Options();
 };
@@ -151,6 +155,8 @@ struct ReadOptions {
   // Default: true
   bool fill_cache;
 
+  bool shrink_result;
+
   // If "snapshot" is non-NULL, read as of the supplied snapshot
   // (which must belong to the DB that is being read and which must
   // not have been released).  If "snapshot" is NULL, use an impliicit
@@ -161,6 +167,7 @@ struct ReadOptions {
   ReadOptions()
       : verify_checksums(false),
         fill_cache(true),
+        shrink_result(true),
         snapshot(NULL) {
   }
 };

@@ -30,6 +30,7 @@ class DBImpl : public DB {
 
   // Implementations of the DB interface
   virtual Status Put(const WriteOptions&, const Slice& key, const Slice& value);
+  virtual Status Append(const WriteOptions&, const Slice& key, const Slice& value);
   virtual Status Delete(const WriteOptions&, const Slice& key);
   virtual Status Write(const WriteOptions& options, WriteBatch* updates);
   virtual Status Get(const ReadOptions& options,
@@ -105,8 +106,9 @@ class DBImpl : public DB {
   Status DoCompactionWork(CompactionState* compact)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
+  Status Output(CompactionState* compact, const Slice& key, const Slice& value, Status input_status);
   Status OpenCompactionOutputFile(CompactionState* compact);
-  Status FinishCompactionOutputFile(CompactionState* compact, Iterator* input);
+  Status FinishCompactionOutputFile(CompactionState* compact, Status input_status);
   Status InstallCompactionResults(CompactionState* compact)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
@@ -118,6 +120,8 @@ class DBImpl : public DB {
   bool owns_info_log_;
   bool owns_cache_;
   const std::string dbname_;
+
+  const ValueMerger *merger_;
 
   // table_cache_ provides its own synchronization
   TableCache* table_cache_;

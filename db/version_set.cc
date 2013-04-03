@@ -13,6 +13,7 @@
 #include "db/table_cache.h"
 #include "leveldb/env.h"
 #include "leveldb/table_builder.h"
+#include "leveldb/value_merger.h"
 #include "table/merger.h"
 #include "table/two_level_iterator.h"
 #include "util/coding.h"
@@ -262,27 +263,45 @@ enum SaverState {
   kFound,
   kDeleted,
   kCorrupt,
+  kPartialValue,
 };
 struct Saver {
   SaverState state;
   const Comparator* ucmp;
   Slice user_key;
   std::string* value;
+  bool has_value;
+  const ValueMerger* merger;
 };
 }
-static void SaveValue(void* arg, const Slice& ikey, const Slice& v) {
+static bool SaveValue(void* arg, const Slice& ikey, const Slice& v) {
   Saver* s = reinterpret_cast<Saver*>(arg);
   ParsedInternalKey parsed_key;
   if (!ParseInternalKey(ikey, &parsed_key)) {
     s->state = kCorrupt;
   } else {
     if (s->ucmp->Compare(parsed_key.user_key, s->user_key) == 0) {
-      s->state = (parsed_key.type == kTypeValue) ? kFound : kDeleted;
-      if (s->state == kFound) {
-        s->value->assign(v.data(), v.size());
+      if (! s->merger) {
+        s->state = (parsed_key.type == kTypeValue) ? kFound : kDeleted;
+        if (s->state == kFound) {
+          s->value->assign(v.data(), v.size());
+        }
+      }
+      else {
+        s->has_value = true;
+        if (parsed_key.type == kTypeValue || parsed_key.type == kTypePartialValue) {
+          s->state = (parsed_key.type == kTypeValue)? kFound: kPartialValue;
+          s->merger->Merge(s->value, (parsed_key.type == kTypePartialValue), v);
+        }
+        else {
+          s->state = kDeleted;
+          s->merger->Merge(s->value, true, Slice());
+        }
       }
     }
   }
+
+  return s->state == kPartialValue? true: false;
 }
 
 static bool NewestFirst(FileMetaData* a, FileMetaData* b) {
@@ -292,6 +311,7 @@ static bool NewestFirst(FileMetaData* a, FileMetaData* b) {
 Status Version::Get(const ReadOptions& options,
                     const LookupKey& k,
                     std::string* value,
+                    const ValueMerger* merger,
                     GetStats* stats) {
   Slice ikey = k.internal_key();
   Slice user_key = k.user_key();
@@ -343,8 +363,21 @@ Status Version::Get(const ReadOptions& options,
           files = NULL;
           num_files = 0;
         } else {
-          files = &tmp2;
-          num_files = 1;
+          if (! merger) {
+            files = &tmp2;
+            num_files = 1;
+          }
+          else {
+            tmp.push_back(files[index]);
+            for (uint32_t i = index + 1; i < num_files; i++) {
+              FileMetaData* f = files[i];
+              if (ucmp->Compare(user_key, f->smallest.user_key()) == 0) {
+                tmp.push_back(f);
+              }
+            }
+            files = &tmp[0];
+            num_files = tmp.size();
+          }
         }
       }
     }
@@ -365,6 +398,8 @@ Status Version::Get(const ReadOptions& options,
       saver.ucmp = ucmp;
       saver.user_key = user_key;
       saver.value = value;
+      saver.has_value = false;
+      saver.merger = merger;
       s = vset_->table_cache_->Get(options, f->number, f->file_size,
                                    ikey, &saver, SaveValue);
       if (!s.ok()) {
@@ -381,11 +416,14 @@ Status Version::Get(const ReadOptions& options,
         case kCorrupt:
           s = Status::Corruption("corrupted key for ", user_key);
           return s;
+        case kPartialValue:
+          s = Status::PartialValue(Slice());
+          break;
       }
     }
   }
 
-  return Status::NotFound(Slice());  // Use an empty error message for speed
+  return s.IsPartialValue()? s: Status::NotFound(Slice());  // Use an empty error message for speed
 }
 
 bool Version::UpdateStats(const GetStats& stats) {
