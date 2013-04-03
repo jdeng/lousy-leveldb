@@ -59,11 +59,11 @@ For a sample of Value Merger, take a look at `db/db_test.cc`. Below implements a
     }
 
     virtual const char* Name() const { return "leveldb.ConcatValueMerger"; }
-  };
 
 To specify a value merger when opening a DB:
-  ConcatValueMerger cvm(",");
-  options.merger  = &cvm;
+
+		ConcatValueMerger cvm(",");
+		options.merger  = &cvm;
 
 To insert delta updates, use `Append()`. And `Get()` will return the whole record.
 
