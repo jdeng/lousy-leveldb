@@ -3,7 +3,7 @@ lousy-leveldb
 
 Lousy Leveldb is leveldb with "lousy" features. Currently it supports delta updates. The delta updates are merged in the `Get()` operation and during background compaction gradually.
 
-Please note this code has not yet been thoroughly tested.
+Please note this code has not yet been thoroughly tested. Please help to review the change: [https://github.com/jdeng/lousy-leveldb/commit/9937bb6c66be12c25cf1e4938b45c121b7e03552].
 
 Usage
 -----
