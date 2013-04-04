@@ -8,7 +8,7 @@ Please note this code has not yet been thoroughly tested.
 Usage
 -----
 
-When opening a db, you need to specify a Value Merger, in which two methods need to be implemented.
+When opening a db, you need to specify a Value Merger, in which two methods need to be implemented. `Shrink()` can be considered a heavy `Merge()` and can be used only when the full value (or all the delta updates) is available.
 
     virtual int Merge(std::string *value, bool partial, const Slice& new_value) const = 0;
     virtual bool Shrink(std::string *value) const = 0;
