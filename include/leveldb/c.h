@@ -84,6 +84,13 @@ extern void leveldb_put(
     const char* val, size_t vallen,
     char** errptr);
 
+extern void leveldb_append(
+    leveldb_t* db,
+    const leveldb_writeoptions_t* options,
+    const char* key, size_t keylen,
+    const char* val, size_t vallen,
+    char** errptr);
+
 extern void leveldb_delete(
     leveldb_t* db,
     const leveldb_writeoptions_t* options,
@@ -175,6 +182,7 @@ extern void leveldb_writebatch_iterate(
     leveldb_writebatch_t*,
     void* state,
     void (*put)(void*, const char* k, size_t klen, const char* v, size_t vlen),
+    void (*append)(void*, const char* k, size_t klen, const char* v, size_t vlen),
     void (*deleted)(void*, const char* k, size_t klen));
 
 /* Options */

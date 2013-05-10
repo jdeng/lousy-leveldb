@@ -177,6 +177,16 @@ void leveldb_put(
             db->rep->Put(options->rep, Slice(key, keylen), Slice(val, vallen)));
 }
 
+void leveldb_append(
+    leveldb_t* db,
+    const leveldb_writeoptions_t* options,
+    const char* key, size_t keylen,
+    const char* val, size_t vallen,
+    char** errptr) {
+  SaveError(errptr,
+            db->rep->Append(options->rep, Slice(key, keylen), Slice(val, vallen)));
+}
+
 void leveldb_delete(
     leveldb_t* db,
     const leveldb_writeoptions_t* options,
@@ -363,17 +373,19 @@ void leveldb_writebatch_iterate(
     leveldb_writebatch_t* b,
     void* state,
     void (*put)(void*, const char* k, size_t klen, const char* v, size_t vlen),
+    void (*append)(void*, const char* k, size_t klen, const char* v, size_t vlen),
     void (*deleted)(void*, const char* k, size_t klen)) {
   class H : public WriteBatch::Handler {
    public:
     void* state_;
     void (*put_)(void*, const char* k, size_t klen, const char* v, size_t vlen);
+    void (*append_)(void*, const char* k, size_t klen, const char* v, size_t vlen);
     void (*deleted_)(void*, const char* k, size_t klen);
     virtual void Put(const Slice& key, const Slice& value) {
       (*put_)(state_, key.data(), key.size(), value.data(), value.size());
     }
     virtual void Append(const Slice& key, const Slice& value) {
-      //TODO
+      (*append_)(state_, key.data(), key.size(), value.data(), value.size());
     }
     virtual void Delete(const Slice& key) {
       (*deleted_)(state_, key.data(), key.size());
@@ -382,6 +394,7 @@ void leveldb_writebatch_iterate(
   H handler;
   handler.state_ = state;
   handler.put_ = put;
+  handler.append_ = append;
   handler.deleted_ = deleted;
   b->rep.Iterate(&handler);
 }
