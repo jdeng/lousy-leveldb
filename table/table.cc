@@ -231,7 +231,6 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k,
       done = true;
       break; 
     } else {
-      Slice handle = iiter->value();
       Iterator* block_iter = BlockReader(this, options, iiter->value());
       block_iter->Seek(k);
       while (block_iter->Valid()) {
