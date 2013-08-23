@@ -104,6 +104,14 @@ static void CheckPut(void* ptr,
   (*state)++;
 }
 
+static void CheckAppend(void* ptr,
+                     const char* k, size_t klen,
+                     const char* v, size_t vlen) {
+  int* state = (int*) ptr;
+	//TODO
+  (*state)++;
+}
+
 // Callback from leveldb_writebatch_iterate()
 static void CheckDel(void* ptr, const char* k, size_t klen) {
   int* state = (int*) ptr;
@@ -246,7 +254,7 @@ int main(int argc, char** argv) {
     CheckGet(db, roptions, "bar", NULL);
     CheckGet(db, roptions, "box", "c");
     int pos = 0;
-    leveldb_writebatch_iterate(wb, &pos, CheckPut, CheckDel);
+    leveldb_writebatch_iterate(wb, &pos, CheckPut, CheckAppend, CheckDel);
     CheckCondition(pos == 3);
     leveldb_writebatch_destroy(wb);
   }
